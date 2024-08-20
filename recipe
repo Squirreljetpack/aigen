@@ -1,12 +1,11 @@
 #!/bin/zsh
 
-# todo: getopts
-# Check if at least one URL is provided
-
+cd "${0:a:h}"
+source "base.zsh"
 
 VERBOSE=false
 # VERBOSE=true
-
+MAX_TRIES=5
 
 usage() {
   echo "Usage: $0 [-v] [-d description] <url1> [url2 ...]"
@@ -17,23 +16,7 @@ if [ $# -lt 1 ]; then
   usage
 fi
 
-### LOGGING AND OUTPUT
-
-err() {
-  printf "\033[31mERROR: $1\033[0m$2\n"
-}
-
-dbg() {
-  [[ $VERBOSE == true ]] && echo "\033[34;47m$1\033[0m"
-}
-
-info() {
-  printf "\033[32m$1\033[0m$2\n"
-}
-
-direct() {
-  printf "\033[1;34m$1\033[0m$2\n"
-}
+### PARSE YOUTUBE
 
 check_url(){
   if ! curl --head --silent --fail "$1" > /dev/null; then
@@ -42,8 +25,16 @@ check_url(){
   fi
 }
 
-
-### PARSE YOUTUBE
+is_youtube_url() {
+  local url="$1"
+  local regex='^https:\/\/(www\.)?youtube\.com\/.*|^https:\/\/(www\.)?youtu\.be\/.*$'
+  
+  if [[ "$url" =~ $regex ]]; then
+    return 0 
+  else
+    return 1 
+  fi
+}
 
 parse_youtube() {
   TITLE=""
@@ -75,18 +66,10 @@ parse_youtube() {
   fi
 }
 
-is_youtube_url() {
-  local url="$1"
-  local regex='^https:\/\/(www\.)?youtube\.com\/.*|^https:\/\/(www\.)?youtu\.be\/.*$'
-  
-  if [[ "$url" =~ $regex ]]; then
-    return 0 
-  else
-    return 1 
-  fi
-}
 
 
+
+### MAIN
 
 while getopts "vd:" opt; do
   case $opt in
@@ -122,55 +105,70 @@ fi
 dbg "$sources"
 dbg "$OUTPUT_FILE"
 
-AI_PARSE_PROMPT="can you convert this to a markdown recipe in the given format? Be concise without omitting important details. Here is a brief example of what the result should look like with contents ellipsized:
----
-cookTime: 3 hours
-prepTime: 10 minutes
-servings: 6
-tags: Italian, beef, stew, braised, comfort food, soup, healthy
-totalTime: 3 hours 10 minutes
----
+AI_PARSE_PROMPT="can you convert this to a markdown recipe in the given format? You can explain your thoughts for each required section, once you are ready, begin your final answer with the yaml frontmatter. Be concise without omitting important details."
+AI_PARSE_COMMENT=""
+AI_PARSE_EXAMPLE="Here is a brief example of what the result should look like with contents ellipsized (The frontmatter time is in minutes):
+    ---
+    cookTime: 180
+    prepTime: 10
+    servings: 6
+    tags: Italian, beef, stew, braised, comfort food, soup, healthy
+    totalTime: 190
+    ---
 
-## Description
+    ## Description
 
-...
+    ...
 
-## Images
-- [Large wooden spoon holding Italian beef stew.](https://www.sipandfeast.com/wp-content/uploads/2021/11/Italian-beef-stew-recipe-3.jpg)
+    ## Images
+    - [Large wooden spoon holding Italian beef stew.](https://www.sipandfeast.com/wp-content/uploads/2021/11/Italian-beef-stew-recipe-3.jpg)
 
-## Ingredients
-| Q | I                  |
-| -------- | -------------------------- |
-| 2 1/2    | pounds chuck roast, cubed  |
-| 1/4      | cup olive oil             |
-...
+    ## Ingredients
+    | Q | I                  |
+    | -------- | -------------------------- |
+    | 2 1/2    | pounds chuck roast, cubed  |
+    | 1/4      | cup olive oil             |
+    ...
 
-## Method
-1. Preheat oven to 300°F (150°C). ...
-2. Add the mushrooms, ...
-...
+    ## Method
+    1. Preheat oven to 300°F (150°C). ...
+    2. Add the mushrooms, ...
+    ...
 
-## Notes
-- If you want a thicker sauce, use a slurry of cornstarch after braising and right before serving.
-- Dried mushrooms can be easily substituted for fresh mushrooms...
-...
+    ## Notes
+    - If you want a thicker sauce, use a slurry of cornstarch after braising and right before serving.
+    - Dried mushrooms can be easily substituted for fresh mushrooms...
+    ...
 
-## Nutrition
-- Calories: 538 kcal
-- Carbohydrates: 7.1g
-...
+    ## Nutrition
+    - Calories: 538 kcal
+    - Carbohydrates: 7.1g
 "
 ai_parse_command() {
-  aichat -f "$1" -f "$2" "$AI_PARSE_PROMPT"
+  aichat -f "$1" -f "$2" "$AI_PARSE_PROMPT" | awk '/^---/{flag=1; next} flag'
 }
 
+ai_verify_command() {
+  # generated file
+  reply=$(aichat -f "$1" -f "$2" "Is the second provided file valid markdown and does it match the template of the first given template with no extra headings added? Are the frontmatter fields servings, prepTime, cookTime, totalTime numeric and in minutes? Explain why, and end your answer with YES or NO.")
+  echo "$reply" | grep -qv "NO" || exit 1
+}
+
+ai_improve_command() {
+  # generated file
+  reply=$(aichat -f "$1" -f "$2" "Is the second provided file valid markdown and does it match the template of the first given template with no extra headings added? Are the frontmatter fields servings, prepTime, cookTime, totalTime numeric and in minutes? Explain why, and end your answer with YES or NO.")
+  echo "$reply" | grep -qv "NO" || exit 1
+}
+
+
 ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" > "$OUTPUT_FILE" &
-bg_pid=$!
 
 # todo, will other pids be safe from this?
 cleanup() {
-  kill "$bg_pid" 2>/dev/null
+  [[ -z "$bg_pid" ]] || kill "$bg_pid" 2>/dev/null
 }
+  
+
 
 echo "Enter additional sources, blank line to finish:"
 while IFS= read -r line; do
@@ -189,7 +187,10 @@ improve-output() {
   # COMMAND_OUTPUT=$(aichat -r improverecipe -f "$RECIPE_URL" -f "$COMMAND_OUTPUT")
   # COMMAND_OUTPUT="$COMMAND_OUTPUT"
   ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" | tee "$OUTPUT_FILE" | bat -l md
+  bg_pid=$!
 }
+
+
 
 # Feed back the output into a verification prompt
 while true; do
@@ -203,10 +204,10 @@ while true; do
   improve-output
 done
 
-cd "${0:a:h}"
+
 _py_interpreter "$PYTHON_SCRIPT" "$OUTPUT_FILE" "$sources" "$DATE"
 
-{ gen_filename=$(aichat -f "$OUTPUT_FILE" "please choose a descriptive filename for this file with - for spaces like Tuscan-Beef-Stew.md" | grep -o '\b\w*\.md\b' | head -n 1)
+{ gen_filename=$(aichat -f "$OUTPUT_FILE" "please choose a descriptive filename for this file with underscores for spaces like Tuscan_Beef_Stew.md" | grep -o '\b\w*\.md\b' | head -n 1)
 direct "Please choose a filename" " ($gen_filename): "
 read -r filename
 if [[ -z "$filename" ]]; then
@@ -216,8 +217,9 @@ DESTINATION_FILE="$DESTINATION_PATH/${filename%%.md}.md"
 mv "$OUTPUT_FILE" "$DESTINATION_FILE"; }
 
 if [ $? -eq 0 ]; then
-  # info "file created at " "---"
-  info "file created at " "$DESTINATION_FILE"
+  [ -f ".hidefiles" ] && info "file created at " "---" ||
+  info "file created at " "$DESTINATION_FILE\n"
+
   echo "Do you want to open the file? ([Y]/n)"
   read ans
   
@@ -225,7 +227,7 @@ if [ $? -eq 0 ]; then
     _ob_open-file "$DESTINATION_FILE"
   fi
 else
-  err "failed?"
+  err "ERR: failed?"
 fi
 
 
