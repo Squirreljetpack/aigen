@@ -1,0 +1,12 @@
+[project]
+authors = ["Rui Yi Zhang <squirreljetpacks@gmail.com>"]
+channels = ["conda-forge"]
+description = "Add a short description here"
+name = "aigen"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python-frontmatter = ">=1.1.0,<2"

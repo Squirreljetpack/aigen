@@ -1,0 +1,213 @@
+#!/bin/zsh
+
+# todo: getopts
+# Check if at least one URL is provided
+
+
+VERBOSE=false
+# VERBOSE=true
+
+
+usage() {
+  echo "Usage: $0 [-v] [-d description] <url1> [url2 ...]"
+  exit 1
+}
+
+if [ $# -lt 1 ]; then
+  usage
+fi
+
+### LOGGING AND OUTPUT
+
+err() {
+  printf "\033[31mERROR: $1\033[0m$2\n"
+}
+
+dbg() {
+  [[ $VERBOSE == true ]] && echo "\033[34;47m$1\033[0m"
+}
+
+info() {
+  printf "\033[32m$1\033[0m$2\n"
+}
+
+direct() {
+  printf "\033[1;34m$1\033[0m$2\n"
+}
+
+check_url(){
+  if ! curl --head --silent --fail "$1" > /dev/null; then
+    err "URL check failed."
+    exit 1
+  fi
+}
+
+
+### PARSE YOUTUBE
+
+parse_youtube() {
+  TITLE=""
+  COVER_IMAGE=""
+  DESCRIPTION=""
+  local count=0
+  yt-dlp --get-description --get-thumbnail --get-title --skip-download "$1" | 
+  while IFS= read -r line; do
+    count=$((count + 1))
+    if [ "$count" -eq 1 ]; then
+      TITLE="$line"
+    elif [ "$count" -eq 2 ]; then
+      COVER_IMAGE="$line"
+    else
+      DESCRIPTION="${DESCRIPTION}${line}"$'\n'
+    fi
+  done
+  DESCRIPTION="${DESCRIPTION%$'\n'}"
+  dbg "$DESCRIPTION"
+  POST_URL=$(echo "$DESCRIPTION" | aichat "Output a url if there is a link to a recipe webpage in this description, and none if there is not" |  grep -Eo 'https?://[^ >]+')
+  if check_url "$POST_URL"; then
+    sources="$INPUT_URL"$'\n'
+    RECIPE_URL="$POST_URL"
+    echo "Recipe URL found: $RECIPE_URL"
+  else
+    dbg "$POST_URL"
+    err "Description not found in url"
+    exit 1
+  fi
+}
+
+is_youtube_url() {
+  local url="$1"
+  local regex='^https:\/\/(www\.)?youtube\.com\/.*|^https:\/\/(www\.)?youtu\.be\/.*$'
+  
+  if [[ "$url" =~ $regex ]]; then
+    return 0 
+  else
+    return 1 
+  fi
+}
+
+
+
+while getopts "vd:" opt; do
+  case $opt in
+    v)
+      VERBOSE=true
+      ;;
+    d)
+      DESCRIPTION="$OPTARG"
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+shift $((OPTIND - 1))
+
+
+
+INPUT_URL=$1
+OUTPUT_FILE="$(mktemp)"
+DATE=$(date +"%Y-%m-%d")
+DESTINATION_PATH="$OBSIDIAN_HOME/Personal/COLLECTIONS/Cooking/Recipes/Untested"
+TEMPLATE_FILE="$OBSIDIAN_HOME/Personal/Obsidian/.templates/AIGEN/Recipe.md"
+PYTHON_SCRIPT="update_frontmatter.py"
+
+if is_youtube_url "$INPUT_URL"; then
+  parse_youtube "$INPUT_URL"
+else
+  RECIPE_URL="$INPUT_URL"
+fi
+
+dbg "$sources"
+dbg "$OUTPUT_FILE"
+
+AI_PARSE_PROMPT="can you convert this to a markdown recipe in the given format? Be concise without omitting important details. Here is a brief example of what the result should look like with contents ellipsized:
+---
+cookTime: 3 hours
+prepTime: 10 minutes
+servings: 6
+tags: Italian, beef, stew, braised, comfort food, soup, healthy
+totalTime: 3 hours 10 minutes
+---
+
+## Description
+
+...
+
+## Images
+- [Large wooden spoon holding Italian beef stew.](https://www.sipandfeast.com/wp-content/uploads/2021/11/Italian-beef-stew-recipe-3.jpg)
+
+## Ingredients
+| Q | I                  |
+| -------- | -------------------------- |
+| 2 1/2    | pounds chuck roast, cubed  |
+| 1/4      | cup olive oil             |
+...
+
+## Method
+1. Preheat oven to 300°F (150°C). ...
+2. Add the mushrooms, ...
+...
+
+## Notes
+- If you want a thicker sauce, use a slurry of cornstarch after braising and right before serving.
+- Dried mushrooms can be easily substituted for fresh mushrooms...
+...
+
+## Nutrition
+- Calories: 538 kcal
+- Carbohydrates: 7.1g
+...
+"
+ai_parse_command() {
+  aichat -f "$1" -f "$2" "$AI_PARSE_PROMPT"
+}
+
+ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" | tee "$OUTPUT_FILE" | bat -l md
+
+# todo: accept user guidance, ensure sane format
+improve-output() {
+  # COMMAND_OUTPUT=$(aichat -r improverecipe -f "$RECIPE_URL" -f "$COMMAND_OUTPUT")
+  # COMMAND_OUTPUT="$COMMAND_OUTPUT"
+  ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" | tee "$OUTPUT_FILE" | bat -l md
+}
+
+# Feed back the output into a verification prompt
+while true; do
+  echo "Is this correct? [Y]/n"
+  read -r ans
+
+  if [[ "$ans" == "${ans#[Nn]}" ]]; then
+    echo "Confirmed"
+    break
+  fi
+  improve-output
+done
+
+cd "${0:a:h}"
+_py_interpreter "$PYTHON_SCRIPT" "$OUTPUT_FILE" "$sources" "$DATE"
+
+{ gen_filename=$(aichat -f "$OUTPUT_FILE" "please choose a descriptive filename for this file with - for spaces like Tuscan-Beef-Stew.md" | grep -o '\b\w*\.md\b' | head -n 1)
+direct "Please choose a filename" " ($gen_filename): "
+read -r filename
+if [[ -z "$filename" ]]; then
+  filename="$gen_filename"
+fi
+DESTINATION_FILE="$DESTINATION_PATH/${filename%%.md}.md"
+mv "$OUTPUT_FILE" "$DESTINATION_FILE"; }
+
+if [ $? -eq 0 ]; then
+  # info "file created at " "---"
+  info "file created at " "$DESTINATION_FILE"
+  echo "Do you want to open the file? ([Y]/n)"
+  read ans
+  
+  if [[ "$ans" == "${ans#[Nn]}" ]]; then
+    _ob_open-file "$DESTINATION_FILE"
+  fi
+else
+  err "failed?"
+fi
+
+
