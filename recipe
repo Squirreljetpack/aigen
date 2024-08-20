@@ -164,7 +164,25 @@ ai_parse_command() {
   aichat -f "$1" -f "$2" "$AI_PARSE_PROMPT"
 }
 
-ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" | tee "$OUTPUT_FILE" | bat -l md
+ai_parse_command "$RECIPE_URL" "$TEMPLATE_FILE" > "$OUTPUT_FILE" &
+bg_pid=$!
+
+# todo, will other pids be safe from this?
+cleanup() {
+  kill "$bg_pid" 2>/dev/null
+}
+
+echo "Enter additional sources, blank line to finish:"
+while IFS= read -r line; do
+  if [[ -z "$line" ]]; then
+    break
+  fi
+  printf ">"
+  sources+="$line"$'\n'
+done < /dev/tty
+sources+="$RECIPE_URL"
+
+bat -lf md "$OUTPUT_FILE"
 
 # todo: accept user guidance, ensure sane format
 improve-output() {
